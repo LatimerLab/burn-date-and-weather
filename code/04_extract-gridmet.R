@@ -23,56 +23,10 @@ geo_dir <- "/mnt/ofo-share-01/reburns"
 setwd(geo_dir)
 
 
-
-#### Prep Gridmet metadata ####
-# 
-# #Look at metadata for any net CDF file: 
-# gmet <- nc_open(paste0("gridmet/erc_2002.nc"))
-# 
-# 
-# gmet_name <- gmet$var[[1]]$name
-# gmet$var[[1]]$units
-# 
-# #get dates: 
-# gmet_dates <- ncvar_get(gmet, "day")
-# gmet_dates_units <- ncatt_get(gmet, "day", "units")
-# gmet_dates_n <- dim(gmet_dates)
-# 
-# #close connection: 
-# nc_close(gmet)
-# 
-# 
-# #Convert the time variable, Dates are in days since 1900-01-01: 
-# 
-# # split the time units string into fields
-# tustr <- strsplit(gmet_dates_units$value, " ")
-# tdstr <- strsplit(unlist(tustr)[3], "-")
-# tmonth = as.integer(unlist(tdstr)[2])
-# tday = as.integer(unlist(tdstr)[3])
-# tyear = as.integer(unlist(tdstr)[1])
-# 
-# #use chron package to convert julian dates since 1900-01-01 to 2020 dates:
-# gmet_dates_mdy <- chron(gmet_dates, format = "m-d-y", origin = c(tmonth, tday, tyear))
-# gmet_dates_mdy
-# 
-# #Convert to lubridate Date format
-# gmet_dates_mdy <- mdy(gmet_dates_mdy, tz = NULL)
-# 
-# #Convert mdy to julian dates in 2020:
-# gmet_dates_julian <- yday(gmet_dates_mdy)
-# gmet_dates_julian
-# #This should be consistent across all gridMet weather variables for
-# # 2020, so I should be able to use this throughout the rest of
-# # the code. 
-# 
-
-gmet_dates_julian = 1:365
-
-
 #### Make a grid of the focal area to extract to ####
 # Based on western US states
 aoi = st_read("focal-region/western-us-states.gpkg")
-tiles = st_make_grid(aoi,cellsize=200000)
+tiles = st_make_grid(aoi,cellsize=25000)
 
 
 
@@ -110,8 +64,9 @@ for(year in years) {
         cat("Running",gmet_var, year,"for tile", tile_index, "of", length(tiles_focs),"\n")
         
         tile_name = paste0("dob-weather-tiles/", gmet_var,"-",year,"-",tile_index,".tif")
+        tile_name_dummy = paste0("dob-weather-tiles/", gmet_var,"-",year,"-",tile_index,".txt")
         
-        if(file.exists(tile_name)) {
+        if(file.exists(tile_name) | file.exists(tile_name_dummy)) {
           cat("Already exists, skipping.\n")
           next()
         }
@@ -130,6 +85,7 @@ for(year in years) {
         # Some tiles have no burns in them data, can skip them
         if(nrow(grid_foc) == 0) {
           cat("No burns, skipping.\n")
+          write.csv(data.frame(a=1), tile_name_dummy)
           next()
         }
         
@@ -138,6 +94,7 @@ for(year in years) {
         # already matched to gridMET data above), output as matrix: 
         grid_foc_proj = project(grid_foc,gm)
         gm_foc = crop(gm,tile_foc %>% st_transform(st_crs(gm)))
+        
         gc()
         gm_extract <- terra::extract(gm_foc, grid_foc_proj, method="bilinear")
         gc()
