@@ -23,9 +23,6 @@ geo_dir <- "/mnt/ofo-share-01/reburns"
 setwd(geo_dir)
 
 
-gmet_dates_julian = 1:365
-
-
 #### Make a grid of the focal area to extract to ####
 # Based on western US states
 aoi = st_read("focal-region/western-us-states.gpkg")

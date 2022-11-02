@@ -49,57 +49,17 @@ library(lubridate)
 library(tidyverse)
 library(here)
 library(chron)
+library(furrr)
+plan(multisession(workers=32))
 
 ## Added by DYoung:
 # The root of the data directory
-data_dir = readLines(here("data_dir.txt"), n=1)
+data_dir = "/mnt/ofo-share-01/reburns/"
 # Convenience functions, including function datadir() to prepend data directory to a relative path
-source(here("scripts/convenience_functions.R"))
+datadir = function(dir) {
+  return (paste0(data_dir,dir))
+}
 # End added.
-
-
-# This is a shapefile of fire perimeters
-# Note this is set up to run on the MTBS fire history shapefile
-
-##!! Mod by DYoung to use FRAP fire perimeters
-
-  # Original Parks code:
-	# setwd('D:/temp/sample.DOB.code/sample.fire.history.atlas')
-	# fire.perims <- st_read('.', 'sample_fire_perimeters')
-	# fire.perims <- st_transform(fire.perims, '+proj=longlat +datum=WGS84 +no_defs')
-
-# DYoung code:
-# Load fire perims. Until FRAP releases 2020 perims, data from: "National USFS Final Fire Perimeter" https://data.fs.usda.gov/geodata/edw/datasets.php?xmlKeyword=fire+perimeter
-fire.perims = st_read(datadir("fire_perims/S_USA.FinalFirePerimeter/S_USA.FinalFirePerimeter.shp"))
-fire.perims = fire.perims %>%
-  mutate(state = str_sub(UNITIDOWNE,1,2)) %>%
-  filter(DISCOVERYD > "2021-01-01" & DISCOVERYD < "2022-01-01",
-         GISACRES > 1000,
-         state == "CA") %>%
-  rename(Fire_ID = "FIREOCCURI") %>%
-  mutate(Fire_ID = paste0("2020-",FIRENAME,Fire_ID))
-
-## New method using Cal Fire perims
-fire.perims = st_read(datadir("fire_perims/fire20_1.gdb"), layer="firep20_1")
-fire.perims = st_read(datadir("fire_perims/ca3987612137920210714_20201012_20211015_ravg_data/ca3987612137920210714_20201012_20211015_burn_bndy.shp")) %>% st_union
-fire.perims = fire.perims %>%
-  mutate(state = "CA") %>%
-  rename(DISCOVERYD = ALARM_DATE) %>%
-  filter(DISCOVERYD > "2020-01-01" & DISCOVERYD < "2021-01-01",
-         GIS_ACRES > 1000,
-         state == "CA") %>%
-  mutate(Fire_ID = paste0("2020_",FIRE_NAME,"_",INC_NUM))
-# Filter to 2020 fires, CA, > 1000 acres
-
-# temporary, only run for GOLD and RED SALMON COMPLEX
-fire.perims = fire.perims %>%
-  filter(FIRE_NAME %in% c("GOLD","RED SALMON COMPLEX"))
-
-##!! End DYoung mod
-
-
-# Year of fires. You will need to modify this file if you have several years to process
-	year <- 202 # <- mod by DYoung. Originai: fire.perims$Year[1]
 
 
 # Set the output pixel size here. Canadian folk might want to consider 100 or 200 m.
@@ -109,105 +69,31 @@ fire.perims = fire.perims %>%
 
 # set projection; this is the standard projection used by many national (USA) programs
 
-	the.prj <- "+proj=aea +lat_1=34 +lat_2=40.5 +lat_0=0 +lon_0=-120 +x_0=0 +y_0=-4000000 +ellps=GRS80 +datum=NAD83 +units=m +no_defs" # <- mod by DYoung. Original: "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"
+	the.prj <- "+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 +y_0=0 +datum=NAD83 +units=m +no_defs"
 
 
 
-#####################################################################################################################################################
-#####################################################################################################################################################
-# Stage 1 selects those fire detetections points that will be used to model day of burning (DOB) and write those points to a shapefile  #############
-#																						    #############
-# NOTE THAT THIS CODE IS SPECIFIC TO FIRE DETECTION DATA OBTAINED FIRMS:										    #############
-# https://firms.modaps.eosdis.nasa.gov/download/                                                               				    #############
-#																						    #############
-#####################################################################################################################################################
-#####################################################################################################################################################
-
-##!! Mod by DYoung to use NWCG-hosted fire detections
-
-# Original Parks code:
-# ## Get MODIS fire detections
-# setwd('D:/temp/sample.DOB.code/sample.fire.detections/')
-# hotspots <- st_read('.', paste0('fire_archive_M6_', year, '_subset'))
-# hotspots <- hotspots[, c('LATITUDE', 'LONGITUDE', 'ACQ_DATE', 'ACQ_TIME', 'SATELLITE', 'INSTRUMENT')]
-# 
-# ## Get VIIRS fire detections
-# if (year >= 2012) {
-# 	hotspots3 <- st_read('.', paste0('fire_archive_V1_', year, '_subset'))
-# 	hotspots3 <- hotspots3[, c('LATITUDE', 'LONGITUDE', 'ACQ_DATE', 'ACQ_TIME', 'SATELLITE', 'INSTRUMENT')]
-# 	hotspots <- rbind(hotspots, hotspots3) # Combine MODIS and VIIRS
-# }
-	
-# DYoung code:
-
-# Compile hotspots and clip to CA if not already done
-	
-if(!file.exists(datadir("intermediate/hotspots_compiled_caclip.gpkg"))) {
-	
-  # Load MODIS and VIIRS hotspots. Data from: https://fsapps.nwcg.gov/afm/gisdata.php
-  modis_hotspots = st_read(datadir("fire_detections/modis_fire_2021_365_conus_shapefile/modis_fire_2021_365_conus.shp"))
-  viirs_hotspots = st_read(datadir("fire_detections/viirs_iband_fire_2021_365_conus_shapefile/viirs_iband_fire_2021_365_conus.shp"))	
-  viirs_hotspots = viirs_hotspots %>%
-    rename(TEMP = BT4TEMP,
-           VIIRS_CONF = CONF) %>%
-    filter(SRC != "gsfc_drl") # to get rid of about 1-5% of points that are not in the VIIRs dataset Parks uses (https://firms.modaps.eosdis.nasa.gov/)
-  	
-  hotspots = bind_rows(modis_hotspots,viirs_hotspots)
   
-  hotspots = hotspots %>%
-    rename(ACQ_DATE = DATE,
-          ACQ_TIME = GMT)
-  
-  # clip hostpots to CA
-  ca = st_read(datadir("ca_boundary/statep010.shp")) %>% st_transform(the.prj)
-  # first, quick pass to filter out a lot
-  hotspots = hotspots %>%
-    filter(LONG < -114,
-           LAT < 42)
-  hotspots = hotspots %>% st_transform(the.prj)
-  #hotspots = st_intersection(hotspots,ca) # this isn't working for some reason. But that's OK because there aren't too many points that are outside CA but within the lat/long bounds above
-  st_write(hotspots,datadir("intermediate/hotspots_compiled_caclip_2021.gpkg"),append=FALSE)
-} else {
-  hotspots = st_read(datadir("intermediate/hotspots_compiled_caclip.gpkg"))
-  st_crs(hotspots) = the.prj
-}
-
-##!! End mod by DYoung
-
-
-fire.list <- "33CBB9DC-6983-4F47-B821-9C9A6CAC381D" # <- DYoung mod. Original: unique(subset(fire.perims, Year == year)$Fire_ID)
-fire.list <- unique(subset(fire.perims)$Fire_ID)
-fire.list = base::setdiff(fire.list,"2020_CREEK_00001391")
-
-
-for (xx in 1:length(fire.list)) {
+process_fire_dob = function(fire_data) {
 		
-	fire <- fire.list[[xx]]
-
-	fire.shp <- subset(fire.perims, Fire_ID == fire)
-
-	fire.shp.prj <- st_transform(fire.shp, crs=the.prj)
-	fire.shp.buffer.prj <- st_buffer(fire.shp.prj, dist=750)
-	fire.shp.buffer.dd <- st_transform(fire.shp.buffer.prj, projection(fire.shp))
-
-	# If there are clearly times when a fire should not be burning, those boundaries can be set here. Sometimes the fire detection
-	# data picks up on industrial activities or slash pile burning or ???. The numbers correspond to Julian day.
-
-	min.date <- fire.shp$DISCOVERYD %>% yday() - 2# <- DYoung mod. Original: 100
-	max.date <- 366 # < DYoung mod. Original: 330
-
-
-	# DYoung removed:
-	# # Again, if there are dates for specific fires that are invalid, they can be stated here. The numbers correspond to Julian day.
-	# 
-	# if (fire == 'MT4715311245620170723') {
-	# 	min.date <- 200; max.date <- 300 }
-
-
-	# This actually selects fire detections points relevant to the fire of interest
-
-	fire.hotspots <- hotspots[fire.shp.buffer.prj,] # <- DY mod to get the projection to match. Original: hotspots[fire.shp.buffer.dd,]
-
+  
+  #####################################################################################################################################################
+  #####################################################################################################################################################
+  # Stage 1 selects those fire detetections points that will be used to model day of burning (DOB) and write those points to a shapefile  #############
+  #																						    #############
+  # NOTE THAT THIS CODE IS SPECIFIC TO FIRE DETECTION DATA OBTAINED FIRMS:										    #############
+  # https://firms.modaps.eosdis.nasa.gov/download/                                                               				    #############
+  #																						    #############
+  #####################################################################################################################################################
+  #####################################################################################################################################################
+  
+  fire = fire_data$fire
+  fire.shp = fire_data$fire.shp
+  fire.hotspots = fire_data$fire.hotspots
+  
+  
+  if(file.exists(datadir(paste0("dob-new-final/",fire,"/", fire,"_dob.tif")))) return(FALSE)
+  
 
 	if (nrow(fire.hotspots) > 0 ) {
 		
@@ -217,7 +103,7 @@ for (xx in 1:length(fire.list)) {
 
 		fire.hotspots$date <- as.numeric(yday(fire.hotspots$ACQ_DATE)) #convert acq_date to julian day
 
-				# DYoung mod so time is a continuous decimal
+		# DYoung mod so time is a continuous decimal
 		fire.hotspots$time = format(fire.hotspots$ACQ_TIME, digits=4)
 		str_sub(fire.hotspots$time,-2,-3) <- ":"
 		fire.hotspots$time = fire.hotspots$time %>% paste0(":00") %>% times() %>% as.numeric()
@@ -234,11 +120,38 @@ for (xx in 1:length(fire.list)) {
 
 		## fire.hotspots$loc_JDT <- round(fire.hotspots$loc_JDT - 4/24, 2) ## subtracting four hours to account for the "shift" described above.
 
+		### DYoung addition to filter outlier burn dates
 
-		## If there are clearly invalid dates, use this.
-		fire.hotspots <- subset(fire.hotspots, loc_JDT > min.date & loc_JDT < max.date)
-
-		# Assigns and ID for accounting later
+    ## reclass into 15 day chunks, and if there are 15 days with no fire, those are the cuts
+    
+    fire.hotspots$loc_JDT_class = cut(fire.hotspots$loc_JDT, seq(from=0,to=366,by=15), labels = seq(from=0,to=366,by=15)[-1])
+    # classes with < 0.001 of the detections
+    tab = table(fire.hotspots$loc_JDT_class)
+    negligible_count = 0.001 * nrow(fire.hotspots)
+    empty_classes = names(tab[tab < negligible_count]) %>% as.character  %>% as.numeric
+    fire.hotspots$loc_JDT_class = fire.hotspots$loc_JDT_class %>% as.character %>% as.numeric
+    
+    # what's the IQR
+    iq_lwr = quantile(fire.hotspots$loc_JDT, 0.25) %>% as.character  %>% as.numeric
+    iq_upr = quantile(fire.hotspots$loc_JDT, 0.75) %>% as.character  %>% as.numeric
+    
+    # what's the largest empty class that's less than the iq-lwr?
+    lwr_clip = max(empty_classes[empty_classes < iq_lwr])
+    if(is.na(lwr_clip) | is.null(lwr_clip) | lwr_clip > iq_lwr) { lwr_clip = 0}
+		
+    # what's the smallest empty class that's greater than the iq-upr?
+    upr_clip = min(empty_classes[empty_classes > iq_upr]) - 14
+    if(is.na(upr_clip) | is.null(upr_clip) | upr_clip < iq_upr) { upr_clip = 0}
+		
+    # subset to being within the clip range
+    fire.hotspots = fire.hotspots %>%
+      filter(loc_JDT_class > lwr_clip & loc_JDT_class < upr_clip)
+    
+    ### End DYoung addition
+    
+    
+    
+		# Assigns an ID for accounting later
 
 		fire.hotspots$ID <- seq(1, nrow(fire.hotspots))
 		
@@ -263,8 +176,7 @@ for (xx in 1:length(fire.list)) {
 			}
 		}	
 
-		# V DYoung mod switched "SATELLITE" to "SAT_SRC
-		fire.hotspots <- subset(fire.hotspots, select=c('ID', 'ACQ_DATE', 'ACQ_TIME', 'SAT_SRC', 'date', 'time', 'loc_JDT'))
+		fire.hotspots <- subset(fire.hotspots, select=c('ID', 'ACQ_DATE', 'ACQ_TIME', 'SATELLITE', 'date', 'time', 'loc_JDT'))
 
 		# DYoung modified
 		
@@ -276,322 +188,299 @@ for (xx in 1:length(fire.list)) {
 		# st_write(fire.hotspots, file.name, delete_layer=TRUE)
 		
 		# New:
-		dir.create(datadir(paste0("fire_progressions/", fire)), recursive=TRUE)
-		file.name <- datadir(paste0("fire_progressions/",fire,"/", fire,"_hotspots.shp"))
-		st_write(fire.hotspots, file.name, delete_layer=TRUE)
+		dir.create(datadir(paste0("dob-new/", fire)), recursive=TRUE)
+		file.name <- datadir(paste0("dob-new/",fire,"/", fire,"_hotspots.shp"))
+		st_write(fire.hotspots, file.name, delete_dsn=TRUE)
 		# End DYoung modified
 		
 	}
-}
-
-
-###################
-# End of Stage 1
-###################
 	
-#####################################################################################
-#####################################################################################
-# Stage 2: this generates the preliminary modeled day of burning (DOB)  #############
-#####################################################################################
-#####################################################################################
-
-# This code will generate estimated day-of-burning based on an interpolation method I made up called 'Weighed by Mean and Distance' (WMD).
-
-
-for (xx in 1:length(fire.list)) {
-
-	# Get fire name and set WD
-
-	fire <- as.character(fire.list[xx])
-
+	gc()
+	
+	###################
+	# End of Stage 1
+	###################
+	
+	#####################################################################################
+	#####################################################################################
+	# Stage 2: this generates the preliminary modeled day of burning (DOB)  #############
+	#####################################################################################
+	#####################################################################################
+	
+	
 	# Get fire perimeter shapefile
-
-	fire.shp <- subset(fire.perims, Fire_ID == fire)
+	
+	# fire.shp <- subset(fire.perims, Fire_ID == fire) #DY: no longer need because it's still loaded in mem
 	fire.shp <- st_transform(fire.shp, crs=the.prj)
-
+	
 	# Get extent of fire perimeter of interest
 	# Set number of row and columns for outputs
-
+	
 	(xmin <- (round(xmin(extent(fire.shp))/pixel.size) * pixel.size) - 15)
 	(xmax <- (round(xmax(extent(fire.shp))/pixel.size) * pixel.size) + 15)
 	(ymin <- (round(ymin(extent(fire.shp))/pixel.size) * pixel.size) - 15)
 	(ymax <- (round(ymax(extent(fire.shp))/pixel.size) * pixel.size) + 15)
 	(nrow <- (ymax-ymin) / pixel.size)
 	(ncol <- (xmax-xmin) / pixel.size)
-
-
+	
+	
 	# Make blank raster and a fire perimeter raster
-
+	
 	blank.raster <- raster(nrows=nrow, ncols=ncol, xmn=xmin, xmx=xmax, ymn=ymin, ymx=ymax)
 	fire.perim.raster <- fasterize(fire.shp, blank.raster)
-
+	
 	## Some perimeters may have zero fire detections, so a directory may not have been created in stage 1
-	if (dir.exists(datadir(paste0("fire_progressions/", fire)))) { # <- DYoung mod using new data directory reference
-
-		# Get fire detetection points
-		fire.hotspots <- st_read(datadir(paste0("fire_progressions/",fire,"/", fire,"_hotspots.shp"))) # <- DYoung mod to use new data directory reference
-		fire.hotspots <- st_transform(fire.hotspots, crs=the.prj)
-
-		# I am under the impression that one should not interpolate DOB if there are not very many fire detections
-		if (nrow(fire.hotspots) >= 10) {
-
-			fire.hotspots.truncated <-  as.data.frame(fire.hotspots)
-			fire.hotspots.truncated <- fire.hotspots.truncated[,c('ID', 'loc_JDT')]
-			fire.hotspots.truncated$new.id <- seq(1:nrow(fire.hotspots.truncated))
-
-			unique.dates <- sort(unique(trunc(fire.hotspots$loc_JDT), decreasing=F))
-
-
-			# Get xy coordinates for each pixel in area where DOB is to be estimated
-
-			xy <- as.data.frame(xyFromCell(fire.perim.raster, 1:ncell(fire.perim.raster), spatial=F))
-			xy$extract <- raster::extract(fire.perim.raster, xy)
-			xy <- na.omit(xy)
-			xy <- xy[,c(1,2)]
-
-
-			# Get coordinates of fire detection points
-	
-			modis.coords <- as.data.frame(st_coordinates(fire.hotspots))
-			colnames(modis.coords) <- c('x', 'y')
-
-
-			# For each pixel, get five closest fire detection points
-
-			nn5 <- get.knnx(cbind(modis.coords$x, modis.coords$y), xy, 5, algorithm='brute')
-			IDs <- as.data.frame(nn5$nn.index)
-			dists <- as.data.frame(nn5$nn.dist)
-			unique <- as.data.frame(seq(1, nrow(xy)))
-
-	
-			# Makes data frame with columns of five nearest IDs, distances, and DOBs
-
-			data <- cbind(unique, IDs)
-			data <- cbind(data, dists)
-			colnames(data) <- c('pixel.id', 'ID1', 'ID2', 'ID3', 'ID4', 'ID5', 'dist1', 'dist2', 'dist3', 'dist4', 'dist5')
-			
-			for (i in 1:5) {
-				data$new.id <- data[,paste('ID',i,sep='')]
-				data <- merge(data, fire.hotspots.truncated, by='new.id')
-				data <- data[order(data$pixel.id),]
-				assign(paste('DOB', i, sep=''), data$loc_JDT) 
-				data <- data[,-c(13,14)]
-			}
-
-			data$DOB1 <- DOB1
-			data$DOB2 <- DOB2
-			data$DOB3 <- DOB3
-			data$DOB4 <- DOB4
-			data$DOB5 <- DOB5
-
-			head(data)
-
-
-			# Make column for the DOB estimates
-
-	
-			data$DOB.wmd <- 0 # weighted by mean and distance
-
-			xyz <- as.data.frame(xy)
-			colnames(xyz) <- c("x","y")
-	
-
-			#####################################################
-			### WEIGHTED MY MEAN and DISTANCE OF 5 NEAREST NEIGHBORS (WMD) (described in Parks [2014]).
-			### the average value of the five nearest fire detection points and it is 
-			### geographically closer to a fire detection point
-			#####################################################
-
-			# This assings weights to each of the five nearest neignbors
-
-			data$DOB.tmp <- (apply(data[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5')], 1, mean))
-
-			data$wt1 <- 1/(((abs(data$DOB1 - data$DOB.tmp)+1) * data$dist1))
-			data$wt2 <- 1/(((abs(data$DOB2 - data$DOB.tmp)+1) * data$dist2))
-			data$wt3 <- 1/(((abs(data$DOB3 - data$DOB.tmp)+1) * data$dist3))
-			data$wt4 <- 1/(((abs(data$DOB4 - data$DOB.tmp)+1) * data$dist4))
-			data$wt5 <- 1/(((abs(data$DOB5 - data$DOB.tmp)+1) * data$dist5))
-			data$wt <- data$wt1 + data$wt2 + data$wt3 + data$wt4 + data$wt5
-			data$wt1 <- data$wt1/data$wt
-			data$wt2 <- data$wt2/data$wt
-			data$wt3 <- data$wt3/data$wt
-			data$wt4 <- data$wt4/data$wt
-			data$wt5 <- data$wt5/data$wt
-	
-
-			# This is the true WMD value
-
-			data$DOB.tmp <-  trunc(((data$wt1 * data$DOB1) + (data$wt2 * data$DOB2) + (data$wt3 * data$DOB3) + (data$wt4 * data$DOB4) + (data$wt5 * data$DOB5)))
-
-
-			# However, this code ensures that the estimated DOB will be a date of one of the five nearest values
-
-			data.tmp <- data[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5', 'DOB.tmp')]
-			data.tmp$test <- apply(abs(trunc(data.tmp[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5')]) - data.tmp[,'DOB.tmp']), 1, which.min)
-			data.tmp$test2 <- 0
-
-			data.tmp$test2[which(data.tmp$test == 1)] <- trunc(data.tmp$DOB1[which(data.tmp$test == 1)])
-			data.tmp$test2[which(data.tmp$test == 2)] <- trunc(data.tmp$DOB2[which(data.tmp$test == 2)])
-			data.tmp$test2[which(data.tmp$test == 3)] <- trunc(data.tmp$DOB3[which(data.tmp$test == 3)]) 
-			data.tmp$test2[which(data.tmp$test == 4)] <- trunc(data.tmp$DOB4[which(data.tmp$test == 4)])
-			data.tmp$test2[which(data.tmp$test == 5)] <- trunc(data.tmp$DOB5[which(data.tmp$test == 5)]) 
-
-			data$DOB.wmd <- data.tmp$test2
-	
-			# Create raster of modeled DOB
-
-			xyz$z <- data[, 'DOB.wmd']
-			
-			modeled.dob <- rasterFromXYZ(xyz, res=c(pixel.size, pixel.size), digits=0, crs=the.prj)		
-			# V Mod by DY to use new data folder reference
-			writeRaster(modeled.dob, datadir(paste0("fire_progressions/",fire,"/", fire,"_dob.temp.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2S', overwrite=T)
-			
-		}
+	if (dir.exists(datadir(paste0("dob-new/", fire)))) { # <- DYoung mod using new data directory reference
+	  
+	  # Get fire detetection points
+	  fire.hotspots <- st_read(datadir(paste0("dob-new/",fire,"/", fire,"_hotspots.shp"))) # <- DYoung mod to use new data directory reference
+	  fire.hotspots <- st_transform(fire.hotspots, crs=the.prj)
+	  
+	  # I am under the impression that one should not interpolate DOB if there are not very many fire detections
+	  if (nrow(fire.hotspots) >= 10) {
+	    
+	    fire.hotspots.truncated <-  as.data.frame(fire.hotspots)
+	    fire.hotspots.truncated <- fire.hotspots.truncated[,c('ID', 'loc_JDT')]
+	    fire.hotspots.truncated$new.id <- seq(1:nrow(fire.hotspots.truncated))
+	    
+	    unique.dates <- sort(unique(trunc(fire.hotspots$loc_JDT), decreasing=F))
+	    
+	    
+	    # Get xy coordinates for each pixel in area where DOB is to be estimated
+	    
+	    xy <- as.data.frame(xyFromCell(fire.perim.raster, 1:ncell(fire.perim.raster), spatial=F))
+	    xy$extract <- raster::extract(fire.perim.raster, xy)
+	    xy <- na.omit(xy)
+	    xy <- xy[,c(1,2)]
+	    
+	    
+	    # Get coordinates of fire detection points
+	    
+	    modis.coords <- as.data.frame(st_coordinates(fire.hotspots))
+	    colnames(modis.coords) <- c('x', 'y')
+	    
+	    
+	    # For each pixel, get five closest fire detection points
+	    
+	    nn5 <- get.knnx(cbind(modis.coords$x, modis.coords$y), xy, 5, algorithm='brute')
+	    IDs <- as.data.frame(nn5$nn.index)
+	    dists <- as.data.frame(nn5$nn.dist)
+	    unique <- as.data.frame(seq(1, nrow(xy)))
+	    
+	    rm(nn5)
+	    
+	    
+	    # Makes data frame with columns of five nearest IDs, distances, and DOBs
+	    
+	    data <- cbind(unique, IDs)
+	    data <- cbind(data, dists)
+	    colnames(data) <- c('pixel.id', 'ID1', 'ID2', 'ID3', 'ID4', 'ID5', 'dist1', 'dist2', 'dist3', 'dist4', 'dist5')
+	    
+	    for (i in 1:5) {
+	      data$new.id <- data[,paste('ID',i,sep='')]
+	      data <- merge(data, fire.hotspots.truncated, by='new.id')
+	      data <- data[order(data$pixel.id),]
+	      assign(paste('DOB', i, sep=''), data$loc_JDT) 
+	      data <- data[,-c(13,14)]
+	    }
+	    
+	    data$DOB1 <- DOB1
+	    data$DOB2 <- DOB2
+	    data$DOB3 <- DOB3
+	    data$DOB4 <- DOB4
+	    data$DOB5 <- DOB5
+	    
+	    head(data)
+	    
+	    
+	    # Make column for the DOB estimates
+	    
+	    
+	    data$DOB.wmd <- 0 # weighted by mean and distance
+	    
+	    xyz <- as.data.frame(xy)
+	    colnames(xyz) <- c("x","y")
+	    
+	    
+	    #####################################################
+	    ### WEIGHTED MY MEAN and DISTANCE OF 5 NEAREST NEIGHBORS (WMD) (described in Parks [2014]).
+	    ### the average value of the five nearest fire detection points and it is 
+	    ### geographically closer to a fire detection point
+	    #####################################################
+	    
+	    # This assings weights to each of the five nearest neignbors
+	    
+	    data$DOB.tmp <- (apply(data[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5')], 1, mean))
+	    
+	    data$wt1 <- 1/(((abs(data$DOB1 - data$DOB.tmp)+1) * data$dist1))
+	    data$wt2 <- 1/(((abs(data$DOB2 - data$DOB.tmp)+1) * data$dist2))
+	    data$wt3 <- 1/(((abs(data$DOB3 - data$DOB.tmp)+1) * data$dist3))
+	    data$wt4 <- 1/(((abs(data$DOB4 - data$DOB.tmp)+1) * data$dist4))
+	    data$wt5 <- 1/(((abs(data$DOB5 - data$DOB.tmp)+1) * data$dist5))
+	    data$wt <- data$wt1 + data$wt2 + data$wt3 + data$wt4 + data$wt5
+	    data$wt1 <- data$wt1/data$wt
+	    data$wt2 <- data$wt2/data$wt
+	    data$wt3 <- data$wt3/data$wt
+	    data$wt4 <- data$wt4/data$wt
+	    data$wt5 <- data$wt5/data$wt
+	    
+	    
+	    # This is the true WMD value
+	    
+	    data$DOB.tmp <-  trunc(((data$wt1 * data$DOB1) + (data$wt2 * data$DOB2) + (data$wt3 * data$DOB3) + (data$wt4 * data$DOB4) + (data$wt5 * data$DOB5)))
+	    
+	    
+	    # However, this code ensures that the estimated DOB will be a date of one of the five nearest values
+	    
+	    data.tmp <- data[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5', 'DOB.tmp')]
+	    data.tmp$test <- apply(abs(trunc(data.tmp[,c('DOB1', 'DOB2', 'DOB3', 'DOB4', 'DOB5')]) - data.tmp[,'DOB.tmp']), 1, which.min)
+	    data.tmp$test2 <- 0
+	    
+	    data.tmp$test2[which(data.tmp$test == 1)] <- trunc(data.tmp$DOB1[which(data.tmp$test == 1)])
+	    data.tmp$test2[which(data.tmp$test == 2)] <- trunc(data.tmp$DOB2[which(data.tmp$test == 2)])
+	    data.tmp$test2[which(data.tmp$test == 3)] <- trunc(data.tmp$DOB3[which(data.tmp$test == 3)]) 
+	    data.tmp$test2[which(data.tmp$test == 4)] <- trunc(data.tmp$DOB4[which(data.tmp$test == 4)])
+	    data.tmp$test2[which(data.tmp$test == 5)] <- trunc(data.tmp$DOB5[which(data.tmp$test == 5)]) 
+	    
+	    data$DOB.wmd <- data.tmp$test2
+	    
+	    # Create raster of modeled DOB
+	    
+	    xyz$z <- data[, 'DOB.wmd']
+	    
+	    modeled.dob <- rasterFromXYZ(xyz, res=c(pixel.size, pixel.size), digits=0, crs=the.prj)		
+	    # V Mod by DY to use new data folder reference
+	    writeRaster(modeled.dob, datadir(paste0("dob-new/",fire,"/", fire,"_dob.temp.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2S', overwrite=T)
+	    
+	    rm(data)
+	    
+	  }
 	}
-}
-
-
-###################
-# End of Stage 2
-###################
-
-
-###################################################################################################################
-###################################################################################################################
-# Stage 3: This stage removes the 'small regions' (those that are less than 25 ha) from the modeled DOB      ######
-# This only improves the overall prediction a little bit, but it is WAY more visually appealing              ######
-###################################################################################################################
-###################################################################################################################
-
-
-for (xx in 1:length(fire.list)) {
-
-	fire <- fire.list[xx]
+	
+	gc()
+	
+	###################
+	# End of Stage 2
+	###################
+	
+	
+	###################################################################################################################
+	###################################################################################################################
+	# Stage 3: This stage removes the 'small regions' (those that are less than 25 ha) from the modeled DOB      ######
+	# This only improves the overall prediction a little bit, but it is WAY more visually appealing              ######
+	###################################################################################################################
+	###################################################################################################################
+	
 
 	## This is a check because stage 1 and 2 does not produce files if there are not enough fire detections
 	# V DYoung mod to new data folder reference, also removed redundant check if data dir exists (because if the file exists, the dir exists)
-	if (file.exists(datadir(paste0("fire_progressions/",fire,"/", fire,"_dob.temp.tif")))) {
-
-		# Load up the modeled DOB
-
+	if (file.exists(datadir(paste0("dob-new/",fire,"/", fire,"_dob.temp.tif")))) {
+	  
+	  # Load up the modeled DOB
+	  
 	  # V DYoung mod to new data folder reference
-		modeled.dob.raster <- raster(datadir(paste0("fire_progressions/",fire,"/", fire,"_dob.temp.tif")))
-
-
-		# Basically, these next steps create 'regions' for all continuous DOB estimates that are less than 25 ha
-		# The value below, 278, should be modified to account for the cell size you are using
-		# and if you want a different threshold than 25 ha.
-		# This step takes a long time and could use someone with good coding skills to speed it up.
-
-		u <- unique(modeled.dob.raster)
-		for (i in 1:length(u)) {
-			x <- modeled.dob.raster==u[i]
-			clump.raster <- clump(x)
-			rg.df <- na.omit(subset(as.data.frame(freq(clump.raster)), count > 0))
-			rg.df$from <- rg.df$value - 0.25
-			rg.df$to <- rg.df$value + 0.25
-			rg.df$becomes = 1
-			## Next two lines: DYoung mod to make the threshold 10 ha. Change 278 cells to 111
-			rg.df$becomes[which(rg.df$count <= 278)] <- 99 
-			rg.df$becomes[which(rg.df$count > 278)] <- 1
-			rg.df <- as.matrix(rg.df[,c(3:5)]) 
-			# I think the next line is what causes it to go so slow.
-			# Might be a data/storage issue
-				assign(paste('clump.raster.', u[i], sep=''), reclassify(clump.raster, rg.df))
-		}
-
-		the.stack <- stack()
-		the.list <- list()
-		for (n in 1:length(u)) {
-			## This returns an error but seems to work
-			## If you have a way to avoid this error, I'd appreciate hearing about it.
-			the.list[n] <- get(noquote(paste('clump.raster.', u[n], sep='')))
-		}
-		the.stack <- stack(the.list)
-
-		names(the.stack) <- u
-		small.regions <- merge(the.stack)
-		
-		##########################################################################################
-		# Now, a nearest neighbor assignment is given to all pixels that have regions < 25 ha    #
-		# from the nearest pixel that is part of a region > 25 hs.                               #
-		##########################################################################################
-
-		xy <- as.data.frame(xyFromCell(small.regions, 1:ncell(small.regions), spatial=F))
-		nrow(xy)
-
-		xy$extract <- raster::extract(small.regions, xy)
-		xy <- na.omit(xy)
-		xy$DOB <- raster::extract(modeled.dob.raster, xy[,c(1,2)])
-		xy$ID <- row.names(xy)
-
-		nibble.df <- subset(xy, extract == 99)
-		
-		nibble.df <- nibble.df[,-c(3,4)]
-		dob.df <- subset(xy, extract != 99)
-
-		# DYoung addition: if there are no small regions, just write the same raster and iterate loop to next fire
-		if(nrow(dob.df) == 0) {
-		  writeRaster(modeled.dob.raster, datadir(paste0("fire_progressions/",fire,"/", fire,"_dob.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2U', overwrite=T)
-		  next()
-		}
-		
-		dob.df$ID <- seq(1, nrow(dob.df))
-		dob.df.tmp <- dob.df[,-c(1,2,3)]
-		dob.df.tmp$id.tmp <- dob.df.tmp$ID
-
-		nibble.nn <- get.knnx(dob.df[,c(1,2)], cbind(nibble.df$x, nibble.df$y), 1, algorithm='brute')
-		nibble.df$id.tmp <- nibble.nn$nn.index
-
-		dob.df.tmp <- dob.df.tmp[,-c(2)]
-
-		nibble.df <- merge(nibble.df, dob.df.tmp, by='id.tmp', all.x=T)
-		nibble.df <- nibble.df[,-c(1,4)]
-
-		dob.df <- rbind(dob.df[,c(1,2,4)], nibble.df)
-
-		# This is the final DOB estimate	
-		modeled.dob <- rasterFromXYZ(dob.df, res=c(pixel.size,pixel.size), digits=0, crs=(the.prj))
-		# V DYoung mod to use new data folder reference
-		writeRaster(modeled.dob, datadir(paste0("fire_progressions/",fire,"/", fire,"_dob.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2U', overwrite=T)
-#		file.remove('dob.tmp.tif'); file.remove('dob.tmp.tfw')
+	  modeled.dob.raster <- raster(datadir(paste0("dob-new/",fire,"/", fire,"_dob.temp.tif")))
+	  
+	  
+	  # Basically, these next steps create 'regions' for all continuous DOB estimates that are less than 25 ha
+	  # The value below, 278, should be modified to account for the cell size you are using
+	  # and if you want a different threshold than 25 ha.
+	  # This step takes a long time and could use someone with good coding skills to speed it up.
+	  
+	  u <- unique(modeled.dob.raster)
+	  for (i in 1:length(u)) {
+	    x <- modeled.dob.raster==u[i]
+	    clump.raster <- clump(x)
+	    rg.df <- na.omit(subset(as.data.frame(freq(clump.raster)), count > 0))
+	    rg.df$from <- rg.df$value - 0.25
+	    rg.df$to <- rg.df$value + 0.25
+	    rg.df$becomes = 1
+	    ## Next two lines: DYoung mod to make the threshold 10 ha. Change 278 cells to 111
+	    rg.df$becomes[which(rg.df$count <= 278)] <- 99 
+	    rg.df$becomes[which(rg.df$count > 278)] <- 1
+	    rg.df <- as.matrix(rg.df[,c(3:5)]) 
+	    # I think the next line is what causes it to go so slow.
+	    # Might be a data/storage issue
+	    assign(paste('clump.raster.', u[i], sep=''), reclassify(clump.raster, rg.df))
+	  }
+	  
+	  the.stack <- stack()
+	  the.list <- list()
+	  for (n in 1:length(u)) {
+	    ## This returns an error but seems to work
+	    ## If you have a way to avoid this error, I'd appreciate hearing about it.
+	    the.list[n] <- get(noquote(paste('clump.raster.', u[n], sep='')))
+	  }
+	  the.stack <- stack(the.list)
+	  
+	  names(the.stack) <- u
+	  small.regions <- merge(the.stack)
+	  
+	  rm(the.stack)
+	  rm(the.list)
+	  
+	  ##########################################################################################
+	  # Now, a nearest neighbor assignment is given to all pixels that have regions < 25 ha    #
+	  # from the nearest pixel that is part of a region > 25 hs.                               #
+	  ##########################################################################################
+	  
+	  xy <- as.data.frame(xyFromCell(small.regions, 1:ncell(small.regions), spatial=F))
+	  nrow(xy)
+	  
+	  xy$extract <- raster::extract(small.regions, xy)
+	  xy <- na.omit(xy)
+	  xy$DOB <- raster::extract(modeled.dob.raster, xy[,c(1,2)])
+	  xy$ID <- row.names(xy)
+	  
+	  nibble.df <- subset(xy, extract == 99)
+	  
+	  nibble.df <- nibble.df[,-c(3,4)]
+	  dob.df <- subset(xy, extract != 99)
+	  
+	  # DYoung addition: if there are no small regions, just write the same raster and iterate loop to next fire
+	  if(nrow(dob.df) == 0) {
+	    dir.create(datadir(paste0("dob-new-final/", fire)), recursive=TRUE)
+	    writeRaster(modeled.dob.raster, datadir(paste0("dob-new-final/",fire,"/", fire,"_dob.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2U', overwrite=T)
+	    next()
+	  }
+	  
+	  dob.df$ID <- seq(1, nrow(dob.df))
+	  dob.df.tmp <- dob.df[,-c(1,2,3)]
+	  dob.df.tmp$id.tmp <- dob.df.tmp$ID
+	  
+	  nibble.nn <- get.knnx(dob.df[,c(1,2)], cbind(nibble.df$x, nibble.df$y), 1, algorithm='brute')
+	  nibble.df$id.tmp <- nibble.nn$nn.index
+	  
+	  dob.df.tmp <- dob.df.tmp[,-c(2)]
+	  
+	  nibble.df <- merge(nibble.df, dob.df.tmp, by='id.tmp', all.x=T)
+	  nibble.df <- nibble.df[,-c(1,4)]
+	  
+	  dob.df <- rbind(dob.df[,c(1,2,4)], nibble.df)
+	  
+	  # This is the final DOB estimate	
+	  modeled.dob <- rasterFromXYZ(dob.df, res=c(pixel.size,pixel.size), digits=0, crs=(the.prj))
+	  # V DYoung mod to use new data folder reference
+	  dir.create(datadir(paste0("dob-new-final/", fire)), recursive=TRUE)
+	  writeRaster(modeled.dob, datadir(paste0("dob-new-final/",fire,"/", fire,"_dob.tif")), format="GTiff", options=c("COMPRESS=LZW", "TFW=YES"), datatype='INT2U', overwrite=T)
+	  #		file.remove('dob.tmp.tif'); file.remove('dob.tmp.tfw')
 	}
+	
+	gc()
 
+	
 }
 
-## This error is returned "implicit list embedding of S4 objects is deprecated"
-## But the procedure completes and works.
-## If you have a way to avoid this error, I'd appreciate hearing about it.
+
+year = 2020
+
+firedata = readRDS(datadir(paste0("prepped-firedata-for-dob-mapping/prepped-firedata-for-dob-mapping_",year,".rds")))
+a = future_walk(firedata,process_fire_dob, .options=furrr_options(scheduling=Inf, chunk_size=NULL))
 
 
-
-
-
-			
-	
 
 
 	
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
