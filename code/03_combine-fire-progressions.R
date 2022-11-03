@@ -33,7 +33,7 @@ geo_dir <- "/mnt/ofo-share-01/reburns/"
 
 merge_year = function(year) {
   
-  folder_list <- list.files(path = paste0(geo_dir, paste0("dob/",year)), full.names = TRUE)
+  folder_list <- list.files(path = paste0(geo_dir, paste0("dob-new-final/",year)), full.names = TRUE)
   
   # #subset to the folders associated with our 40 biggest fires: 
   # folder_list_fires <- str_subset(folder_list, paste(fires, collapse = "|"))
@@ -63,4 +63,4 @@ merge_year = function(year) {
 }
 
 plan(multisession, workers=3)
-future_walk(2002:2019,merge_year)
+future_walk(2020:2021,merge_year)
