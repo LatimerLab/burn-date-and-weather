@@ -94,7 +94,7 @@ for(year in years) {
         #Extract gridmet values for each grid point (projection
         # already matched to gridMET data above), output as matrix: 
         grid_foc_proj = project(grid_foc,gm)
-        gm_foc = crop(gm,tile_foc %>% st_transform(st_crs(gm)))
+        gm_foc = crop(gm,tile_foc %>% st_buffer(10000) %>% st_transform(st_crs(gm)))
         
         gc()
         gm_extract <- terra::extract(gm_foc, grid_foc_proj, method="bilinear")
