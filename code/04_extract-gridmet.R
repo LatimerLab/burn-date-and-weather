@@ -34,7 +34,7 @@ tiles = st_make_grid(aoi,cellsize=25000)
 #### Begin extraction for each year-variable-tile combo ####
 gmet_vars = c("erc","fm100","fm1000","th","vpd","vs")
 gmet_vars = c("vpd","vs")
-years = 2020:2021
+years = 2002:2021
 
 for(year in years) {
     
