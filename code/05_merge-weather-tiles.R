@@ -12,6 +12,7 @@ setwd(geo_dir)
 
 #### Load the tiles for specfic variable-year combos to make sure we have produced all the tiles ####
 gmet_vars = c("erc","fm100","fm1000","th","vpd","vs")
+gmet_vars = c("erc","fm100")
 years = 2002:2021
 
 var_year = expand.grid(var = gmet_vars, year = years)
