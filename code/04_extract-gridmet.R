@@ -10,7 +10,7 @@
 
 library(ncdf4)
 library(terra)
-library(chron) #to deal with dates in netCDF
+#library(chron) #to deal with dates in netCDF
 library(lubridate)
 library(tidyr)
 library(dplyr)
@@ -99,6 +99,10 @@ for(year in years) {
         gc()
         gm_extract <- terra::extract(gm_foc, grid_foc_proj, method="bilinear")
         gc()
+        
+        # Remove the ID column
+        gm_extract = gm_extract[,-1]
+        
         #Since the extracted data is a matrix with 2,019,660 rows (one row
         # for each grid point) and 366 columns (one column for each day
         # of the year in 2020), we can use matrix indexing to pull out
